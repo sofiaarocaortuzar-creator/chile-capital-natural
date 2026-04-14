@@ -891,6 +891,56 @@ def main():
 
     st.divider()
 
+    # ---------------------------------------------------------------------------
+    # Introducción
+    # ---------------------------------------------------------------------------
+    with st.expander("📖 ¿Qué es este dashboard y cómo usarlo?", expanded=True):
+        col_left, col_right = st.columns([3, 2], gap="large")
+
+        with col_left:
+            st.markdown("""
+### Chile — Capital Natural
+
+Este dashboard consolida información ambiental de Chile a nivel comunal con el
+objetivo de hacer visible el estado y la evolución del **capital natural** del país:
+los recursos ecosistémicos que sostienen la economía, la sociedad y el bienestar humano.
+
+**¿Qué datos contiene?**
+
+| Capa | Fuente | Cobertura |
+|---|---|---|
+| 🌿 Cobertura vegetal y uso de suelo | MapBiomas Chile, Colección 2 | 342 comunas · 1999–2024 |
+| 🌲 Deforestación y transiciones | MapBiomas Chile (hoja TRANSITION) | 316 comunas · 1999–2024 |
+| 💧 Riesgo hídrico | WRI Aqueduct 4.0 (baseline 2000–2019) | 340 comunas · 7 indicadores |
+
+**¿Cómo navegar?**
+- Usa el **panel izquierdo** para filtrar por región, comuna y año.
+- Cada pestaña muestra un tema distinto: mapas, series temporales, deforestación y riesgo hídrico.
+- La pestaña **📊 Datos y exportación** permite descargar tablas en CSV listas para R, Python o Stata.
+""")
+
+        with col_right:
+            st.markdown("""
+### Uso para análisis cuantitativo
+
+Los datos están diseñados para complementarse con información **socioeconómica**
+(CASEN, SII, INE, entre otros) y usarse en modelos econométricos de panel:
+
+- Efectos de la deforestación sobre indicadores económicos locales
+- Relación entre riesgo hídrico y productividad agrícola
+- Valoración económica de servicios ecosistémicos
+- Modelos de diferencias en diferencias (DiD) con shocks ambientales
+
+Cada tabla exportable incluye el **código CUT comunal** como llave de unión
+con otras fuentes de datos oficiales de Chile.
+
+---
+**Fuentes**
+- [MapBiomas Chile](https://chile.mapbiomas.org/) — Col. 2, clasificación LULC 30 m
+- [WRI Aqueduct 4.0](https://www.wri.org/aqueduct) — Riesgo hídrico por cuenca
+- [GADM 4.1](https://gadm.org/) — Límites comunales
+""")
+
     # Tabs
     t1, t2, t3, t4, t5, t6 = st.tabs([
         "🗺️ Mapa de cobertura",
