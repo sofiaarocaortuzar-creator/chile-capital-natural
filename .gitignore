@@ -1,0 +1,26 @@
+# Datos crudos (archivos grandes que no van al repo)
+data/raw/
+
+# Virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyc
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs y temporales
+*.log
+*.tmp
