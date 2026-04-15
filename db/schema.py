@@ -129,6 +129,32 @@ CREATE TABLE IF NOT EXISTS water_risk (
     n_basins            INTEGER,   -- número de cuencas que intersectan la comuna
     total_basin_area_km2 DOUBLE
 );
+
+-- CASEN comunal — indicadores socioeconómicos por comuna y año de encuesta
+-- Años disponibles: 2017, 2020, 2022
+CREATE TABLE IF NOT EXISTS casen_comunal (
+    cut_code            VARCHAR(5)  NOT NULL,
+    year                INTEGER     NOT NULL,  -- año de la encuesta CASEN
+    n_obs               INTEGER,               -- observaciones en la muestra
+    representativa      BOOLEAN,               -- n_obs >= 50 (cautela si FALSE)
+    -- Ingreso
+    ypc_promedio        DOUBLE,    -- ingreso per cápita del hogar, promedio ponderado (CLP)
+    ypc_mediana         DOUBLE,    -- mediana del ingreso per cápita (CLP)
+    -- Pobreza
+    tasa_pobreza        DOUBLE,    -- % personas en pobreza por ingresos
+    tasa_pobreza_multi  DOUBLE,    -- % personas en pobreza multidimensional (5 dimensiones)
+    -- Mercado laboral
+    tasa_ocupacion      DOUBLE,    -- % personas activas que están ocupadas
+    -- Capital humano
+    esc_promedio        DOUBLE,    -- años de escolaridad promedio (personas >= 15 años)
+    -- Acceso a servicios básicos
+    pct_agua_red        DOUBLE,    -- % hogares con agua de red pública
+    pct_alcantarillado  DOUBLE,    -- % hogares con alcantarillado
+    -- Composición social
+    pct_indigena        DOUBLE,    -- % personas que se identifican como indígena
+    pct_urbano          DOUBLE,    -- % personas en área urbana (área == 1)
+    PRIMARY KEY (cut_code, year)
+);
 """
 
 # ---------------------------------------------------------------------------
@@ -139,7 +165,7 @@ def setup_schema(con: duckdb.DuckDBPyConnection) -> None:
     """Crea todas las tablas si no existen y limpia en orden correcto."""
     console.print("[bold cyan]🗄 Configurando esquema DuckDB…[/bold cyan]")
     # Borrar en orden inverso de dependencias (hijos antes que padres)
-    for tbl in ["deforestation_events", "water_risk", "panel_anual",
+    for tbl in ["casen_comunal", "deforestation_events", "water_risk", "panel_anual",
                 "vegetation_coverage", "coverage_classes", "comunas"]:
         con.execute(f"DROP TABLE IF EXISTS {tbl}")
     con.execute(DDL)
@@ -299,6 +325,32 @@ def load_water_risk(con: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> None:
     con.execute("INSERT INTO water_risk SELECT * FROM data")
     n = con.execute("SELECT COUNT(*) FROM water_risk").fetchone()[0]
     console.print(f"  [green]✓ water_risk: {n} comunas cargadas[/green]")
+
+
+def load_casen(con: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> None:
+    """Carga la tabla CASEN comunal (indicadores socioeconómicos por comuna y año)."""
+    console.print(f"  Cargando CASEN comunal: {len(df):,} filas…")
+    con.execute("DELETE FROM casen_comunal")
+
+    # Columnas esperadas en el schema
+    expected_cols = [
+        "cut_code", "year", "n_obs", "representativa",
+        "ypc_promedio", "ypc_mediana",
+        "tasa_pobreza", "tasa_pobreza_multi",
+        "tasa_ocupacion", "esc_promedio",
+        "pct_agua_red", "pct_alcantarillado",
+        "pct_indigena", "pct_urbano",
+    ]
+    # Añadir columnas faltantes como NaN
+    for col in expected_cols:
+        if col not in df.columns:
+            df[col] = float("nan") if col not in ("cut_code", "year", "n_obs", "representativa") else None
+
+    data = df[expected_cols].copy()
+    con.execute("INSERT INTO casen_comunal SELECT * FROM data")
+    n = con.execute("SELECT COUNT(*) FROM casen_comunal").fetchone()[0]
+    n_years = con.execute("SELECT COUNT(DISTINCT year) FROM casen_comunal").fetchone()[0]
+    console.print(f"  [green]✓ casen_comunal: {n:,} filas ({n_years} años cargados)[/green]")
 
 
 # ---------------------------------------------------------------------------

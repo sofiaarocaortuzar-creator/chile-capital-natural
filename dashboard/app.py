@@ -585,6 +585,19 @@ def load_water_risk_data(_con) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+@st.cache_data
+def load_casen_data(_con) -> pd.DataFrame:
+    try:
+        return _con.execute("""
+            SELECT cs.*, c.name AS comuna_name, c.region_name
+            FROM casen_comunal cs
+            JOIN comunas c ON c.cut_code = cs.cut_code
+            ORDER BY cs.cut_code, cs.year
+        """).df()
+    except Exception:
+        return pd.DataFrame()
+
+
 # ---------------------------------------------------------------------------
 # Tabs — Deforestación y Riesgo Hídrico
 # ---------------------------------------------------------------------------
@@ -849,6 +862,163 @@ def tab_water_risk(df_risk: pd.DataFrame, geojson: dict | None, params: dict):
 
 
 # ---------------------------------------------------------------------------
+# Tab — CASEN Socioeconómico
+# ---------------------------------------------------------------------------
+
+CASEN_INDICATORS = {
+    "tasa_pobreza":       "Pobreza por ingresos (%)",
+    "tasa_pobreza_multi": "Pobreza multidimensional (%)",
+    "tasa_ocupacion":     "Tasa de ocupación (%)",
+    "esc_promedio":       "Escolaridad promedio (años)",
+    "ypc_promedio":       "Ingreso per cápita promedio (CLP)",
+    "pct_agua_red":       "Acceso a agua de red (%)",
+    "pct_alcantarillado": "Acceso a alcantarillado (%)",
+    "pct_indigena":       "Población indígena (%)",
+    "pct_urbano":         "Población urbana (%)",
+}
+
+
+def tab_casen(df_casen: pd.DataFrame, geojson: dict | None, params: dict):
+    if df_casen.empty:
+        st.info(
+            "Datos CASEN no disponibles. Ejecuta el pipeline para cargarlos: "
+            "`python run.py pipeline`"
+        )
+        return
+
+    st.markdown(
+        "Indicadores socioeconómicos comunales a partir de la Encuesta CASEN "
+        "(Ministerio de Desarrollo Social). Años disponibles: **2017 · 2020 · 2022**. "
+        "Las comunas con muestra < 50 personas se marcan como no representativas."
+    )
+
+    # Filtros
+    col_ind, col_year, col_repr = st.columns(3)
+    with col_ind:
+        indicator = st.selectbox(
+            "Indicador", list(CASEN_INDICATORS.keys()),
+            format_func=lambda k: CASEN_INDICATORS[k], key="casen_ind"
+        )
+    with col_year:
+        years_avail = sorted(df_casen["year"].unique())
+        year_sel = st.selectbox("Año CASEN", years_avail,
+                                index=len(years_avail) - 1, key="casen_year")
+    with col_repr:
+        only_repr = st.checkbox("Solo comunas representativas (n ≥ 50)", value=True, key="casen_repr")
+
+    df_f = df_casen[df_casen["year"] == year_sel].copy()
+    if only_repr and "representativa" in df_f.columns:
+        df_f = df_f[df_f["representativa"] == True]
+
+    ind_label = CASEN_INDICATORS[indicator]
+
+    # Mapa
+    col_map, col_dist = st.columns([3, 2])
+    with col_map:
+        if geojson and indicator in df_f.columns:
+            is_pct = "pct" in indicator or "tasa" in indicator
+            color_scale = "RdYlGn_r" if "pobreza" in indicator else (
+                "RdYlGn" if ("ocupacion" in indicator or "agua" in indicator
+                             or "alcantarillado" in indicator or "esc" in indicator) else "Blues"
+            )
+            fig = px.choropleth_mapbox(
+                df_f.dropna(subset=[indicator]),
+                geojson=geojson,
+                locations="cut_code",
+                featureidkey="properties.GID_3",
+                color=indicator,
+                color_continuous_scale=color_scale,
+                mapbox_style="carto-positron",
+                zoom=3.5, center={"lat": -37, "lon": -71},
+                opacity=0.75,
+                hover_name="comuna_name",
+                hover_data={"region_name": True, indicator: ":.1f",
+                            "cut_code": False, "n_obs": True},
+                labels={indicator: ind_label, "n_obs": "Muestra"},
+                title=f"{ind_label} — {year_sel}",
+                height=450,
+            )
+            fig.update_layout(margin={"r": 0, "t": 40, "l": 0, "b": 0})
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("GeoJSON no disponible para el mapa.")
+
+    with col_dist:
+        st.markdown(f"##### Distribución — {ind_label}")
+        fig_hist = px.histogram(
+            df_f.dropna(subset=[indicator]),
+            x=indicator,
+            nbins=30,
+            color_discrete_sequence=["#3498db"],
+            labels={indicator: ind_label},
+            height=200,
+        )
+        fig_hist.update_layout(margin={"t": 10, "b": 40}, showlegend=False)
+        st.plotly_chart(fig_hist, use_container_width=True)
+
+        # Top 10 con peor / mejor indicador
+        ascending = "pobreza" in indicator   # mayor pobreza = peor
+        top10 = df_f.dropna(subset=[indicator]).nsmallest(10, indicator) \
+            if not ascending else df_f.dropna(subset=[indicator]).nlargest(10, indicator)
+        label_top = "Mayor valor" if ascending else "Menor valor"
+        st.markdown(f"**{label_top} — top 10 comunas**")
+        st.dataframe(
+            top10[["comuna_name", "region_name", indicator, "n_obs"]]
+            .rename(columns={"comuna_name": "Comuna", "region_name": "Región",
+                             indicator: ind_label, "n_obs": "Muestra"})
+            .style.format({ind_label: "{:.1f}"}),
+            use_container_width=True, hide_index=True, height=280,
+        )
+
+    # Evolución temporal — comparar años disponibles
+    st.markdown("---")
+    st.markdown("##### Evolución entre encuestas — comparación temporal")
+
+    region_sel = params.get("region")
+    if region_sel:
+        df_trend = df_casen[df_casen["region_name"] == region_sel]
+    else:
+        df_trend = df_casen.copy()
+
+    if only_repr and "representativa" in df_trend.columns:
+        df_trend = df_trend[df_trend["representativa"] == True]
+
+    if indicator in df_trend.columns and not df_trend.empty:
+        df_trend_agg = (
+            df_trend.groupby("year")[indicator]
+            .agg(["mean", "median", "std"])
+            .reset_index()
+            .rename(columns={"mean": "Promedio", "median": "Mediana", "std": "Desv. estándar"})
+        )
+        fig_trend = px.line(
+            df_trend_agg, x="year", y=["Promedio", "Mediana"],
+            markers=True,
+            labels={"year": "Año CASEN", "value": ind_label, "variable": ""},
+            title=f"{ind_label} — {'Región: ' + region_sel if region_sel else 'Chile'} · evolución",
+            color_discrete_sequence=["#2980b9", "#27ae60"],
+            height=320,
+        )
+        fig_trend.update_xaxes(tickvals=years_avail)
+        st.plotly_chart(fig_trend, use_container_width=True)
+
+    # Tabla exportable
+    st.markdown("##### Datos completos")
+    display_cols = ["comuna_name", "region_name", "year", "n_obs", "representativa"] + [
+        c for c in CASEN_INDICATORS if c in df_casen.columns
+    ]
+    df_tbl = df_casen[display_cols].sort_values(["cut_code", "year"])
+    st.dataframe(
+        df_tbl.rename(columns={"comuna_name": "Comuna", "region_name": "Región",
+                                "year": "Año", "n_obs": "Muestra", "representativa": "Representativa",
+                                **{k: v for k, v in CASEN_INDICATORS.items()}}),
+        use_container_width=True, hide_index=True, height=350,
+    )
+    csv = df_tbl.to_csv(index=False).encode("utf-8")
+    st.download_button("⬇️ Descargar datos CASEN comunal (CSV)", csv,
+                       "casen_comunal_chile.csv", "text/csv")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -868,6 +1038,7 @@ def main():
 
     df_defor = load_deforestation_data(con)
     df_risk  = load_water_risk_data(con)
+    df_casen = load_casen_data(con)
     params   = build_sidebar(con, df_panel)
 
     # Header
@@ -912,6 +1083,7 @@ los recursos ecosistémicos que sostienen la economía, la sociedad y el bienest
 | 🌿 Cobertura vegetal y uso de suelo | MapBiomas Chile, Colección 2 | 342 comunas · 1999–2024 |
 | 🌲 Deforestación y transiciones | MapBiomas Chile (hoja TRANSITION) | 316 comunas · 1999–2024 |
 | 💧 Riesgo hídrico | WRI Aqueduct 4.0 (baseline 2000–2019) | 340 comunas · 7 indicadores |
+| 👥 Socioeconómico | CASEN 2017, 2020, 2022 (MIDESO) | ~300 comunas · 9 indicadores |
 
 **¿Cómo navegar?**
 - Usa el **panel izquierdo** para filtrar por región, comuna y año.
@@ -942,12 +1114,13 @@ con otras fuentes de datos oficiales de Chile.
 """)
 
     # Tabs
-    t1, t2, t3, t4, t5, t6 = st.tabs([
+    t1, t2, t3, t4, t5, t6, t7 = st.tabs([
         "🗺️ Mapa de cobertura",
         "📈 Series temporales",
         "🔍 Detalle por clase",
         "🌲 Deforestación",
         "💧 Riesgo hídrico",
+        "👥 Socioeconómico (CASEN)",
         "📊 Datos y exportación",
     ])
 
@@ -956,7 +1129,8 @@ con otras fuentes de datos oficiales de Chile.
     with t3: tab_detalle_comuna(con, params)
     with t4: tab_deforestation(df_defor, geojson, params)
     with t5: tab_water_risk(df_risk, geojson, params)
-    with t6: tab_datos(df_panel, params)
+    with t6: tab_casen(df_casen, geojson, params)
+    with t7: tab_datos(df_panel, params)
 
 
 if __name__ == "__main__":

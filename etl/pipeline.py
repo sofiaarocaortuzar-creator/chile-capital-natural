@@ -17,6 +17,7 @@ from rich.rule import Rule
 from db.schema import (
     build_panel,
     get_connection,
+    load_casen,
     load_classes,
     load_comunas,
     load_deforestation,
@@ -33,6 +34,7 @@ from etl.transform import (
     load_comunas_geodataframe,
     load_mapbiomas_xlsx,
 )
+from etl.transform_casen import build_casen_dataframe
 from etl.transform_deforestation import build_deforestation_dataframe
 from etl.transform_water_risk import build_water_risk_dataframe
 
@@ -44,6 +46,7 @@ def run_pipeline(
     download_only: bool = False,
     load_only: bool = False,
     skip_water_risk: bool = False,
+    skip_casen: bool = False,
 ) -> None:
     """Ejecuta el pipeline completo ETL → DuckDB."""
     t0 = time.perf_counter()
@@ -90,6 +93,16 @@ def run_pipeline(
     else:
         console.print("  [dim]Riesgo hídrico omitido (--skip-water-risk)[/dim]")
 
+    # 2d. CASEN — indicadores socioeconómicos comunales (2017, 2020, 2022)
+    df_casen = None
+    if not skip_casen:
+        try:
+            df_casen = build_casen_dataframe()
+        except Exception as e:
+            console.print(f"  [yellow]⚠ CASEN omitido por error: {e}[/yellow]")
+    else:
+        console.print("  [dim]CASEN omitido (--skip-casen)[/dim]")
+
     # ------------------------------------------------------------------
     # PASO 3 — Carga en DuckDB
     # ------------------------------------------------------------------
@@ -105,6 +118,8 @@ def run_pipeline(
     load_deforestation(con, df_deforestation)
     if df_water_risk is not None:
         load_water_risk(con, df_water_risk)
+    if df_casen is not None:
+        load_casen(con, df_casen)
 
     con.close()
 

@@ -43,6 +43,7 @@ def pipeline(
     download_only:    bool = typer.Option(False, "--download-only",    help="Solo descarga, no procesa"),
     load_only:        bool = typer.Option(False, "--load-only",        help="Solo procesa (asume archivos descargados)"),
     skip_water_risk:  bool = typer.Option(False, "--skip-water-risk",  help="Omite descarga de Aqueduct (~249 MB)"),
+    skip_casen:       bool = typer.Option(False, "--skip-casen",       help="Omite descarga de CASEN (~200 MB total)"),
 ):
     """Ejecuta el pipeline completo: descarga → transforma → carga en DuckDB."""
     from etl.pipeline import run_pipeline
@@ -51,6 +52,7 @@ def pipeline(
         download_only=download_only,
         load_only=load_only,
         skip_water_risk=skip_water_risk,
+        skip_casen=skip_casen,
     )
 
 
