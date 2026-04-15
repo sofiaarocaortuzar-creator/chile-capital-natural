@@ -598,6 +598,19 @@ def load_casen_data(_con) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+@st.cache_data
+def load_incendios_data(_con) -> pd.DataFrame:
+    try:
+        return _con.execute("""
+            SELECT i.*, c.name AS comuna_name, c.region_name
+            FROM incendios i
+            JOIN comunas c ON c.cut_code = i.cut_code
+            ORDER BY i.cut_code, i.season_end
+        """).df()
+    except Exception:
+        return pd.DataFrame()
+
+
 # ---------------------------------------------------------------------------
 # Tabs — Deforestación y Riesgo Hídrico
 # ---------------------------------------------------------------------------
@@ -862,6 +875,137 @@ def tab_water_risk(df_risk: pd.DataFrame, geojson: dict | None, params: dict):
 
 
 # ---------------------------------------------------------------------------
+# Tab — Incendios Forestales
+# ---------------------------------------------------------------------------
+
+def tab_incendios(df_inc: pd.DataFrame, geojson: dict | None, params: dict):
+    if df_inc.empty:
+        st.info("Datos de incendios no disponibles. Ejecuta `python run.py pipeline`.")
+        return
+
+    st.markdown(
+        "Estadísticas de incendios forestales por comuna basadas en registros de **CONAF** "
+        "(1985–2024). Cada temporada corre de octubre a abril; el año indicado corresponde "
+        "al año de término de la temporada."
+    )
+
+    # Métricas resumen
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total incendios (histórico)", f"{df_inc['n_incendios'].sum():,.0f}")
+    c2.metric("Ha totales afectadas", f"{df_inc['ha_total'].sum()/1e6:.2f} M ha")
+    c3.metric("Ha vegetación natural", f"{df_inc['ha_veg_natural'].sum()/1e6:.2f} M ha")
+    c4.metric("Temporadas disponibles",
+              f"{df_inc['season_end'].min()}–{df_inc['season_end'].max()}")
+
+    st.markdown("---")
+
+    # Filtros
+    col_met, col_rng = st.columns(2)
+    with col_met:
+        metrica = st.selectbox("Métrica", [
+            ("ha_total",       "Hectáreas totales afectadas"),
+            ("n_incendios",    "Número de incendios"),
+            ("ha_veg_natural", "Ha vegetación natural quemada"),
+            ("ha_plantacion",  "Ha plantaciones quemadas"),
+        ], format_func=lambda x: x[1], key="inc_met")
+        met_col, met_label = metrica
+
+    with col_rng:
+        years = sorted(df_inc["season_end"].unique())
+        yr_range = st.select_slider("Rango de temporadas",
+                                    options=years, value=(years[0], years[-1]),
+                                    key="inc_yr")
+
+    df_f = df_inc[(df_inc["season_end"] >= yr_range[0]) &
+                  (df_inc["season_end"] <= yr_range[1])].copy()
+
+    # Serie temporal nacional
+    df_ts = df_f.groupby("season_end")[["n_incendios", "ha_total", "ha_veg_natural",
+                                        "ha_plantacion"]].sum().reset_index()
+
+    col_ts, col_map = st.columns([2, 3])
+
+    with col_ts:
+        st.markdown(f"##### {met_label} por temporada (Chile)")
+        fig_ts = px.bar(
+            df_ts, x="season_end", y=met_col,
+            color_discrete_sequence=["#e74c3c"],
+            labels={"season_end": "Temporada", met_col: met_label},
+            height=320,
+        )
+        fig_ts.update_layout(margin={"t": 10, "b": 40})
+        st.plotly_chart(fig_ts, use_container_width=True)
+
+    with col_map:
+        st.markdown(f"##### Acumulado por comuna ({yr_range[0]}–{yr_range[1]})")
+        df_map = df_f.groupby(["cut_code", "comuna_name", "region_name"])[met_col]\
+                     .sum().reset_index()
+        if geojson:
+            fig_map = px.choropleth_mapbox(
+                df_map, geojson=geojson,
+                locations="cut_code", featureidkey="properties.GID_3",
+                color=met_col, color_continuous_scale="YlOrRd",
+                mapbox_style="carto-positron",
+                zoom=3.5, center={"lat": -37, "lon": -71}, opacity=0.8,
+                hover_name="comuna_name",
+                hover_data={"region_name": True, met_col: ":,.0f", "cut_code": False},
+                labels={met_col: met_label},
+                height=350,
+            )
+            fig_map.update_layout(margin={"r": 0, "t": 10, "l": 0, "b": 0})
+            st.plotly_chart(fig_map, use_container_width=True)
+
+    # Top 15 comunas más afectadas
+    st.markdown("---")
+    col_top, col_det = st.columns([2, 3])
+
+    with col_top:
+        st.markdown(f"##### Top 15 comunas — {met_label} acumulado")
+        top15 = df_map.nlargest(15, met_col)
+        fig_bar = px.bar(
+            top15.sort_values(met_col),
+            x=met_col, y="comuna_name",
+            orientation="h",
+            color_discrete_sequence=["#c0392b"],
+            labels={met_col: met_label, "comuna_name": ""},
+            height=380,
+        )
+        fig_bar.update_layout(margin={"t": 10})
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+    with col_det:
+        # Serie temporal para comunas seleccionadas
+        region_sel = params.get("region")
+        if region_sel:
+            comunas_opts = sorted(df_f[df_f["region_name"] == region_sel]
+                                  ["comuna_name"].unique())
+        else:
+            top5 = df_map.nlargest(5, met_col)["comuna_name"].tolist()
+            comunas_opts = sorted(df_f["comuna_name"].unique())
+
+        default = [c for c in (top5 if not region_sel else comunas_opts[:3])
+                   if c in comunas_opts][:3]
+        sel_comunas = st.multiselect("Comunas para comparar",
+                                     comunas_opts, default=default, key="inc_com")
+
+        if sel_comunas:
+            df_com = df_f[df_f["comuna_name"].isin(sel_comunas)]
+            fig_com = px.line(
+                df_com, x="season_end", y=met_col, color="comuna_name",
+                markers=True,
+                labels={"season_end": "Temporada", met_col: met_label,
+                        "comuna_name": ""},
+                height=350,
+            )
+            st.plotly_chart(fig_com, use_container_width=True)
+
+    # Exportar
+    csv = df_f.to_csv(index=False).encode("utf-8")
+    st.download_button("⬇️ Descargar datos de incendios (CSV)", csv,
+                       "incendios_comunal_chile.csv", "text/csv")
+
+
+# ---------------------------------------------------------------------------
 # Tab — CASEN Socioeconómico
 # ---------------------------------------------------------------------------
 
@@ -1038,6 +1182,7 @@ def main():
 
     df_defor = load_deforestation_data(con)
     df_risk  = load_water_risk_data(con)
+    df_inc   = load_incendios_data(con)
     df_casen = load_casen_data(con)
     params   = build_sidebar(con, df_panel)
 
@@ -1083,6 +1228,7 @@ los recursos ecosistémicos que sostienen la economía, la sociedad y el bienest
 | 🌿 Cobertura vegetal y uso de suelo | MapBiomas Chile, Colección 2 | 342 comunas · 1999–2024 |
 | 🌲 Deforestación y transiciones | MapBiomas Chile (hoja TRANSITION) | 316 comunas · 1999–2024 |
 | 💧 Riesgo hídrico | WRI Aqueduct 4.0 (baseline 2000–2019) | 340 comunas · 7 indicadores |
+| 🔥 Incendios forestales | CONAF (1985–2024) | 338 comunas · 40 temporadas |
 | 👥 Socioeconómico | CASEN 2017, 2020, 2022 (MIDESO) | ~300 comunas · 9 indicadores |
 
 **¿Cómo navegar?**
@@ -1114,12 +1260,13 @@ con otras fuentes de datos oficiales de Chile.
 """)
 
     # Tabs
-    t1, t2, t3, t4, t5, t6, t7 = st.tabs([
+    t1, t2, t3, t4, t5, t6, t7, t8 = st.tabs([
         "🗺️ Mapa de cobertura",
         "📈 Series temporales",
         "🔍 Detalle por clase",
         "🌲 Deforestación",
         "💧 Riesgo hídrico",
+        "🔥 Incendios forestales",
         "👥 Socioeconómico (CASEN)",
         "📊 Datos y exportación",
     ])
@@ -1129,8 +1276,9 @@ con otras fuentes de datos oficiales de Chile.
     with t3: tab_detalle_comuna(con, params)
     with t4: tab_deforestation(df_defor, geojson, params)
     with t5: tab_water_risk(df_risk, geojson, params)
-    with t6: tab_casen(df_casen, geojson, params)
-    with t7: tab_datos(df_panel, params)
+    with t6: tab_incendios(df_inc, geojson, params)
+    with t7: tab_casen(df_casen, geojson, params)
+    with t8: tab_datos(df_panel, params)
 
 
 if __name__ == "__main__":

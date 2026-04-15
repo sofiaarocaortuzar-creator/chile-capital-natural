@@ -130,6 +130,19 @@ CREATE TABLE IF NOT EXISTS water_risk (
     total_basin_area_km2 DOUBLE
 );
 
+-- Incendios forestales por comuna y temporada (CONAF 1985–2024)
+CREATE TABLE IF NOT EXISTS incendios (
+    cut_code        VARCHAR(5)  NOT NULL,
+    season_start    INTEGER     NOT NULL,  -- año inicio temporada (ej: 2023)
+    season_end      INTEGER     NOT NULL,  -- año fin temporada (ej: 2024)
+    n_incendios     INTEGER,               -- número de incendios
+    ha_total        DOUBLE,                -- total hectáreas afectadas
+    ha_forestal     DOUBLE,                -- ha forestales (plantaciones + veg natural)
+    ha_veg_natural  DOUBLE,                -- ha vegetación natural quemada
+    ha_plantacion   DOUBLE,                -- ha de plantaciones quemadas
+    PRIMARY KEY (cut_code, season_end)
+);
+
 -- CASEN comunal — indicadores socioeconómicos por comuna y año de encuesta
 -- Años disponibles: 2017, 2020, 2022
 CREATE TABLE IF NOT EXISTS casen_comunal (
@@ -165,8 +178,8 @@ def setup_schema(con: duckdb.DuckDBPyConnection) -> None:
     """Crea todas las tablas si no existen y limpia en orden correcto."""
     console.print("[bold cyan]🗄 Configurando esquema DuckDB…[/bold cyan]")
     # Borrar en orden inverso de dependencias (hijos antes que padres)
-    for tbl in ["casen_comunal", "deforestation_events", "water_risk", "panel_anual",
-                "vegetation_coverage", "coverage_classes", "comunas"]:
+    for tbl in ["casen_comunal", "incendios", "deforestation_events", "water_risk",
+                "panel_anual", "vegetation_coverage", "coverage_classes", "comunas"]:
         con.execute(f"DROP TABLE IF EXISTS {tbl}")
     con.execute(DDL)
     console.print("  [green]✓ Tablas creadas[/green]")
@@ -325,6 +338,22 @@ def load_water_risk(con: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> None:
     con.execute("INSERT INTO water_risk SELECT * FROM data")
     n = con.execute("SELECT COUNT(*) FROM water_risk").fetchone()[0]
     console.print(f"  [green]✓ water_risk: {n} comunas cargadas[/green]")
+
+
+def load_incendios(con: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> None:
+    """Carga la tabla de incendios forestales por comuna y temporada."""
+    console.print(f"  Cargando incendios: {len(df):,} registros…")
+    con.execute("DELETE FROM incendios")
+    cols = ["cut_code", "season_start", "season_end",
+            "n_incendios", "ha_total", "ha_forestal", "ha_veg_natural", "ha_plantacion"]
+    for col in cols:
+        if col not in df.columns:
+            df[col] = None
+    data = df[cols].copy()
+    con.execute("INSERT INTO incendios SELECT * FROM data")
+    n = con.execute("SELECT COUNT(*) FROM incendios").fetchone()[0]
+    n_sea = con.execute("SELECT COUNT(DISTINCT season_end) FROM incendios").fetchone()[0]
+    console.print(f"  [green]✓ incendios: {n:,} registros ({n_sea} temporadas)[/green]")
 
 
 def load_casen(con: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> None:

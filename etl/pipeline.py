@@ -21,6 +21,7 @@ from db.schema import (
     load_classes,
     load_comunas,
     load_deforestation,
+    load_incendios,
     load_vegetation_coverage,
     load_water_risk,
     setup_schema,
@@ -35,6 +36,7 @@ from etl.transform import (
     load_mapbiomas_xlsx,
 )
 from etl.transform_casen import build_casen_dataframe
+from etl.transform_incendios import build_incendios_dataframe
 from etl.transform_deforestation import build_deforestation_dataframe
 from etl.transform_water_risk import build_water_risk_dataframe
 
@@ -46,7 +48,8 @@ def run_pipeline(
     download_only: bool = False,
     load_only: bool = False,
     skip_water_risk: bool = False,
-    skip_casen: bool = False,
+    skip_casen:     bool = False,
+    skip_incendios: bool = False,
 ) -> None:
     """Ejecuta el pipeline completo ETL → DuckDB."""
     t0 = time.perf_counter()
@@ -93,7 +96,17 @@ def run_pipeline(
     else:
         console.print("  [dim]Riesgo hídrico omitido (--skip-water-risk)[/dim]")
 
-    # 2d. CASEN — indicadores socioeconómicos comunales (2017, 2020, 2022)
+    # 2d. Incendios forestales (CONAF 1985–2024)
+    df_incendios = None
+    if not skip_incendios:
+        try:
+            df_incendios = build_incendios_dataframe(gdf_comunas)
+        except Exception as e:
+            console.print(f"  [yellow]⚠ Incendios omitidos por error: {e}[/yellow]")
+    else:
+        console.print("  [dim]Incendios omitidos (--skip-incendios)[/dim]")
+
+    # 2e. CASEN — indicadores socioeconómicos comunales (2017, 2020, 2022)
     df_casen = None
     if not skip_casen:
         try:
@@ -118,6 +131,8 @@ def run_pipeline(
     load_deforestation(con, df_deforestation)
     if df_water_risk is not None:
         load_water_risk(con, df_water_risk)
+    if df_incendios is not None:
+        load_incendios(con, df_incendios)
     if df_casen is not None:
         load_casen(con, df_casen)
 
