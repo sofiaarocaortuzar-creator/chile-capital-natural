@@ -168,6 +168,18 @@ CREATE TABLE IF NOT EXISTS casen_comunal (
     pct_urbano          DOUBLE,    -- % personas en área urbana (área == 1)
     PRIMARY KEY (cut_code, year)
 );
+
+-- Calidad del aire por comuna y año (SINCA — estaciones de monitoreo)
+-- Cobertura: ~80–120 comunas con estaciones activas
+CREATE TABLE IF NOT EXISTS calidad_aire (
+    cut_code            VARCHAR(5)  NOT NULL,
+    year                INTEGER     NOT NULL,
+    pm25_mean           DOUBLE,    -- PM2.5 µg/m³, promedio anual (media de estaciones)
+    pm10_mean           DOUBLE,    -- PM10 µg/m³, promedio anual
+    n_stations_pm25     INTEGER,   -- número de estaciones PM2.5 en la comuna
+    n_stations_pm10     INTEGER,   -- número de estaciones PM10 en la comuna
+    PRIMARY KEY (cut_code, year)
+);
 """
 
 # ---------------------------------------------------------------------------
@@ -178,8 +190,8 @@ def setup_schema(con: duckdb.DuckDBPyConnection) -> None:
     """Crea todas las tablas si no existen y limpia en orden correcto."""
     console.print("[bold cyan]🗄 Configurando esquema DuckDB…[/bold cyan]")
     # Borrar en orden inverso de dependencias (hijos antes que padres)
-    for tbl in ["casen_comunal", "incendios", "deforestation_events", "water_risk",
-                "panel_anual", "vegetation_coverage", "coverage_classes", "comunas"]:
+    for tbl in ["calidad_aire", "casen_comunal", "incendios", "deforestation_events",
+                "water_risk", "panel_anual", "vegetation_coverage", "coverage_classes", "comunas"]:
         con.execute(f"DROP TABLE IF EXISTS {tbl}")
     con.execute(DDL)
     console.print("  [green]✓ Tablas creadas[/green]")
@@ -354,6 +366,25 @@ def load_incendios(con: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> None:
     n = con.execute("SELECT COUNT(*) FROM incendios").fetchone()[0]
     n_sea = con.execute("SELECT COUNT(DISTINCT season_end) FROM incendios").fetchone()[0]
     console.print(f"  [green]✓ incendios: {n:,} registros ({n_sea} temporadas)[/green]")
+
+
+def load_calidad_aire(con: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> None:
+    """Carga la tabla de calidad del aire (PM2.5, PM10) por comuna y año."""
+    console.print(f"  Cargando calidad del aire: {len(df):,} registros…")
+    con.execute("DELETE FROM calidad_aire")
+    cols = ["cut_code", "year", "pm25_mean", "pm10_mean", "n_stations_pm25", "n_stations_pm10"]
+    for col in cols:
+        if col not in df.columns:
+            df[col] = None
+    data = df[cols].copy()
+    con.execute("INSERT INTO calidad_aire SELECT * FROM data")
+    n = con.execute("SELECT COUNT(*) FROM calidad_aire").fetchone()[0]
+    n_yr = con.execute("SELECT COUNT(DISTINCT year) FROM calidad_aire").fetchone()[0]
+    n_pm25 = con.execute("SELECT COUNT(*) FROM calidad_aire WHERE pm25_mean IS NOT NULL").fetchone()[0]
+    console.print(
+        f"  [green]✓ calidad_aire: {n:,} registros ({n_yr} años, "
+        f"{n_pm25:,} con PM2.5)[/green]"
+    )
 
 
 def load_casen(con: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> None:

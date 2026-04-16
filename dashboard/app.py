@@ -599,6 +599,19 @@ def load_casen_data(_con) -> pd.DataFrame:
 
 
 @st.cache_data
+def load_calidad_aire_data(_con) -> pd.DataFrame:
+    try:
+        return _con.execute("""
+            SELECT a.*, c.name AS comuna_name, c.region_name
+            FROM calidad_aire a
+            JOIN comunas c ON c.cut_code = a.cut_code
+            ORDER BY a.cut_code, a.year
+        """).df()
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data
 def load_incendios_data(_con) -> pd.DataFrame:
     try:
         return _con.execute("""
@@ -1022,6 +1035,168 @@ CASEN_INDICATORS = {
 }
 
 
+def tab_calidad_aire(df_aire: pd.DataFrame, geojson: dict | None, params: dict):
+    if df_aire.empty:
+        st.info(
+            "Datos de calidad del aire no disponibles aún. "
+            "Ejecuta el pipeline con `uv run python run.py pipeline` para cargarlos. "
+            "(El proceso SINCA toma ~20–30 min la primera vez.)"
+        )
+        return
+
+    region_sel = params.get("region")
+    comuna_sel = params.get("comunas", [])
+
+    df = df_aire.copy()
+    if region_sel:
+        df = df[df["region_name"] == region_sel]
+    if comuna_sel:
+        df = df[df["comuna_name"].isin(comuna_sel)]
+
+    years_avail = sorted(df["year"].unique()) if not df.empty else []
+    n_com_pm25 = df[df["pm25_mean"].notna()]["cut_code"].nunique()
+    n_com_pm10 = df[df["pm10_mean"].notna()]["cut_code"].nunique()
+
+    st.subheader("🌬 Calidad del aire — PM2.5 y PM10 (SINCA)")
+    st.caption(
+        f"Estaciones de monitoreo SINCA · {n_com_pm25} comunas con PM2.5 · "
+        f"{n_com_pm10} comunas con PM10 · {min(years_avail) if years_avail else '?'}–{max(years_avail) if years_avail else '?'}"
+    )
+
+    WHO_PM25 = 5.0   # µg/m³ OMS 2021
+    WHO_PM10 = 15.0  # µg/m³ OMS 2021
+
+    # ── Métricas rápidas ──────────────────────────────────────────────────
+    col1, col2, col3, col4 = st.columns(4)
+    last_yr = df["year"].max() if not df.empty else None
+    if last_yr:
+        df_last = df[df["year"] == last_yr]
+        avg_pm25 = df_last["pm25_mean"].mean()
+        avg_pm10 = df_last["pm10_mean"].mean()
+        pct_sobre_oms = (df_last["pm25_mean"] > WHO_PM25).sum() / df_last["pm25_mean"].notna().sum() * 100 if df_last["pm25_mean"].notna().sum() > 0 else 0
+        col1.metric("Año más reciente", str(int(last_yr)))
+        col2.metric("PM2.5 promedio (µg/m³)", f"{avg_pm25:.1f}" if pd.notna(avg_pm25) else "—",
+                    delta=f"OMS: {WHO_PM25}", delta_color="inverse")
+        col3.metric("PM10 promedio (µg/m³)", f"{avg_pm10:.1f}" if pd.notna(avg_pm10) else "—",
+                    delta=f"OMS: {WHO_PM10}", delta_color="inverse")
+        col4.metric("Comunas sobre norma OMS PM2.5", f"{pct_sobre_oms:.0f}%")
+
+    st.divider()
+    col_l, col_r = st.columns([3, 2])
+
+    with col_l:
+        # ── Serie temporal nacional ───────────────────────────────────────
+        st.markdown("##### Evolución PM2.5 y PM10 — promedio de comunas monitoreadas")
+        df_trend = df.groupby("year").agg(
+            pm25=("pm25_mean", "mean"),
+            pm10=("pm10_mean", "mean"),
+        ).reset_index()
+
+        if not df_trend.empty:
+            fig = go.Figure()
+            if df_trend["pm25"].notna().any():
+                fig.add_trace(go.Scatter(
+                    x=df_trend["year"], y=df_trend["pm25"],
+                    name="PM2.5 (µg/m³)", mode="lines+markers",
+                    line=dict(color="#e74c3c", width=2),
+                ))
+                fig.add_hline(y=WHO_PM25, line_dash="dash", line_color="#e74c3c",
+                              opacity=0.5, annotation_text="OMS PM2.5 (5 µg/m³)")
+            if df_trend["pm10"].notna().any():
+                fig.add_trace(go.Scatter(
+                    x=df_trend["year"], y=df_trend["pm10"],
+                    name="PM10 (µg/m³)", mode="lines+markers",
+                    line=dict(color="#f39c12", width=2),
+                ))
+                fig.add_hline(y=WHO_PM10, line_dash="dash", line_color="#f39c12",
+                              opacity=0.5, annotation_text="OMS PM10 (15 µg/m³)")
+            fig.update_layout(
+                height=320,
+                xaxis_title="Año",
+                yaxis_title="µg/m³",
+                legend=dict(orientation="h", y=-0.2),
+                margin=dict(l=0, r=0, t=20, b=0),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    with col_r:
+        # ── Mapa PM2.5 último año disponible ─────────────────────────────
+        st.markdown(f"##### Mapa PM2.5 — {int(last_yr) if last_yr else '?'}")
+        if geojson and last_yr:
+            df_map = df[df["year"] == last_yr].dropna(subset=["pm25_mean"])
+            if not df_map.empty:
+                fig_map = px.choropleth_map(
+                    df_map, geojson=geojson,
+                    locations="cut_code", featureidkey="properties.cut_code",
+                    color="pm25_mean",
+                    color_continuous_scale="Reds",
+                    range_color=(0, df_map["pm25_mean"].quantile(0.95)),
+                    labels={"pm25_mean": "PM2.5 (µg/m³)", "comuna_name": "Comuna"},
+                    hover_data={"comuna_name": True, "pm25_mean": ":.1f", "pm10_mean": ":.1f", "cut_code": False},
+                    center={"lat": -35.5, "lon": -71.5},
+                    zoom=3.5, height=320,
+                    map_style="carto-positron",
+                )
+                fig_map.update_layout(margin=dict(l=0, r=0, t=0, b=0),
+                                      coloraxis_colorbar=dict(title="PM2.5"))
+                st.plotly_chart(fig_map, use_container_width=True)
+            else:
+                st.info("Sin datos de PM2.5 para el período seleccionado.")
+
+    st.divider()
+
+    # ── Ranking comunas más contaminadas ─────────────────────────────────
+    st.markdown("##### Top 15 comunas con mayor PM2.5 promedio")
+    if last_yr:
+        df_rank = (
+            df[df["year"] == last_yr]
+            .dropna(subset=["pm25_mean"])
+            .sort_values("pm25_mean", ascending=False)
+            .head(15)
+        )
+        if not df_rank.empty:
+            fig_bar = px.bar(
+                df_rank, x="pm25_mean", y="comuna_name",
+                orientation="h",
+                color="pm25_mean",
+                color_continuous_scale="Reds",
+                labels={"pm25_mean": "PM2.5 (µg/m³)", "comuna_name": ""},
+                height=380,
+            )
+            fig_bar.add_vline(x=WHO_PM25, line_dash="dash", line_color="#e74c3c",
+                              annotation_text="OMS (5)")
+            fig_bar.update_layout(
+                margin=dict(l=0, r=0, t=10, b=0),
+                showlegend=False,
+                yaxis=dict(autorange="reversed"),
+            )
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+    # ── Tabla exportable ─────────────────────────────────────────────────
+    st.markdown("##### Datos completos")
+    display_cols = [c for c in ["comuna_name", "region_name", "year",
+                                 "pm25_mean", "pm10_mean", "n_stations_pm25", "n_stations_pm10"]
+                    if c in df.columns]
+    df_tbl = df.sort_values(["comuna_name", "year"])[display_cols]
+    st.dataframe(
+        df_tbl.rename(columns={
+            "comuna_name": "Comuna", "region_name": "Región",
+            "year": "Año", "pm25_mean": "PM2.5 (µg/m³)", "pm10_mean": "PM10 (µg/m³)",
+            "n_stations_pm25": "Estaciones PM2.5", "n_stations_pm10": "Estaciones PM10",
+        }),
+        use_container_width=True, hide_index=True, height=350,
+    )
+    csv = df_tbl.to_csv(index=False).encode("utf-8")
+    st.download_button("⬇️ Descargar calidad del aire comunal (CSV)", csv,
+                       "calidad_aire_comunal_chile.csv", "text/csv")
+
+    st.info(
+        "⚠️ **Nota metodológica**: Los datos corresponden a estaciones de monitoreo SINCA "
+        "(urbanas/industriales). Comunas sin estación aparecen sin dato. "
+        "Normas OMS 2021: PM2.5 ≤ 5 µg/m³, PM10 ≤ 15 µg/m³."
+    )
+
+
 def tab_casen(df_casen: pd.DataFrame, geojson: dict | None, params: dict):
     if df_casen.empty:
         st.info(
@@ -1184,6 +1359,7 @@ def main():
     df_risk  = load_water_risk_data(con)
     df_inc   = load_incendios_data(con)
     df_casen = load_casen_data(con)
+    df_aire  = load_calidad_aire_data(con)
     params   = build_sidebar(con, df_panel)
 
     # Header
@@ -1229,6 +1405,7 @@ los recursos ecosistémicos que sostienen la economía, la sociedad y el bienest
 | 🌲 Deforestación y transiciones | MapBiomas Chile (hoja TRANSITION) | 316 comunas · 1999–2024 |
 | 💧 Riesgo hídrico | WRI Aqueduct 4.0 (baseline 2000–2019) | 340 comunas · 7 indicadores |
 | 🔥 Incendios forestales | CONAF (1985–2024) | 338 comunas · 40 temporadas |
+| 🌬 Calidad del aire | SINCA — estaciones MMA (PM2.5, PM10) | ~100 comunas · 2000–2024 |
 | 👥 Socioeconómico | CASEN 2017, 2020, 2022 (MIDESO) | ~300 comunas · 9 indicadores |
 
 **¿Cómo navegar?**
@@ -1260,13 +1437,14 @@ con otras fuentes de datos oficiales de Chile.
 """)
 
     # Tabs
-    t1, t2, t3, t4, t5, t6, t7, t8 = st.tabs([
+    t1, t2, t3, t4, t5, t6, t7, t8, t9 = st.tabs([
         "🗺️ Mapa de cobertura",
         "📈 Series temporales",
         "🔍 Detalle por clase",
         "🌲 Deforestación",
         "💧 Riesgo hídrico",
         "🔥 Incendios forestales",
+        "🌬 Calidad del aire",
         "👥 Socioeconómico (CASEN)",
         "📊 Datos y exportación",
     ])
@@ -1277,8 +1455,9 @@ con otras fuentes de datos oficiales de Chile.
     with t4: tab_deforestation(df_defor, geojson, params)
     with t5: tab_water_risk(df_risk, geojson, params)
     with t6: tab_incendios(df_inc, geojson, params)
-    with t7: tab_casen(df_casen, geojson, params)
-    with t8: tab_datos(df_panel, params)
+    with t7: tab_calidad_aire(df_aire, geojson, params)
+    with t8: tab_casen(df_casen, geojson, params)
+    with t9: tab_datos(df_panel, params)
 
 
 if __name__ == "__main__":

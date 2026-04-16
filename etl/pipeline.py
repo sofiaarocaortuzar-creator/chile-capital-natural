@@ -6,6 +6,7 @@ Uso:
     python run.py pipeline --download-only
     python run.py pipeline --load-only        # Asume archivos ya descargados
     python run.py pipeline --skip-water-risk  # Omite Aqueduct (249 MB)
+    python run.py pipeline --skip-aire        # Omite SINCA (puede tardar 20–40 min)
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ from db.schema import (
     build_panel,
     get_connection,
     load_casen,
+    load_calidad_aire,
     load_classes,
     load_comunas,
     load_deforestation,
@@ -39,6 +41,7 @@ from etl.transform_casen import build_casen_dataframe
 from etl.transform_incendios import build_incendios_dataframe
 from etl.transform_deforestation import build_deforestation_dataframe
 from etl.transform_water_risk import build_water_risk_dataframe
+from etl.transform_aire import build_aire_dataframe
 
 console = Console()
 
@@ -48,8 +51,9 @@ def run_pipeline(
     download_only: bool = False,
     load_only: bool = False,
     skip_water_risk: bool = False,
-    skip_casen:     bool = False,
-    skip_incendios: bool = False,
+    skip_casen:      bool = False,
+    skip_incendios:  bool = False,
+    skip_aire:       bool = False,
 ) -> None:
     """Ejecuta el pipeline completo ETL → DuckDB."""
     t0 = time.perf_counter()
@@ -116,6 +120,16 @@ def run_pipeline(
     else:
         console.print("  [dim]CASEN omitido (--skip-casen)[/dim]")
 
+    # 2f. Calidad del aire (SINCA — PM2.5 y PM10 por estación, ~20–40 min)
+    df_aire = None
+    if not skip_aire:
+        try:
+            df_aire = build_aire_dataframe(gdf_comunas)
+        except Exception as e:
+            console.print(f"  [yellow]⚠ Calidad del aire omitida por error: {e}[/yellow]")
+    else:
+        console.print("  [dim]Calidad del aire omitida (--skip-aire)[/dim]")
+
     # ------------------------------------------------------------------
     # PASO 3 — Carga en DuckDB
     # ------------------------------------------------------------------
@@ -135,6 +149,8 @@ def run_pipeline(
         load_incendios(con, df_incendios)
     if df_casen is not None:
         load_casen(con, df_casen)
+    if df_aire is not None:
+        load_calidad_aire(con, df_aire)
 
     con.close()
 
