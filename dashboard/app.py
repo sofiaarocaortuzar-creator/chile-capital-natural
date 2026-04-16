@@ -1150,7 +1150,7 @@ def tab_casen(df_casen: pd.DataFrame, geojson: dict | None, params: dict):
     display_cols = ["comuna_name", "region_name", "year", "n_obs", "representativa"] + [
         c for c in CASEN_INDICATORS if c in df_casen.columns
     ]
-    df_tbl = df_casen[display_cols].sort_values(["cut_code", "year"])
+    df_tbl = df_casen.sort_values(["comuna_name", "year"])[display_cols]
     st.dataframe(
         df_tbl.rename(columns={"comuna_name": "Comuna", "region_name": "Región",
                                 "year": "Año", "n_obs": "Muestra", "representativa": "Representativa",
