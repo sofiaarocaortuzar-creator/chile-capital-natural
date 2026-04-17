@@ -17,18 +17,30 @@ Nota sobre representatividad comunal:
 """
 from __future__ import annotations
 
+import difflib
 import io
 import tempfile
+import unicodedata
 import urllib.request
 import zipfile
 from pathlib import Path
+from typing import Optional
 
+import geopandas as gpd
 import pandas as pd
 from rich.console import Console
 
 from etl.config import RAW_DIR
 
 console = Console()
+
+
+def _normalize(s: str) -> str:
+    """Normaliza nombre de comuna para matching (minúsculas, sin tildes)."""
+    s = s.lower().strip()
+    s = unicodedata.normalize("NFD", s)
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    return s
 
 # ---------------------------------------------------------------------------
 # Configuración por año
@@ -243,11 +255,15 @@ def _aggregate_comuna(group: pd.DataFrame, varmap: dict[str, str]) -> dict:
         # Mediana aproximada (sin ponderar exacta, suficiente para panel)
         row["ypc_mediana"] = col.dropna().median()
 
-    # Pobreza por ingresos (pobreza > 0 → pobre)
+    # Pobreza por ingresos
+    # CASEN codifica inversamente: valor MAYOR = no pobre (p.ej. 3=No pobreza)
+    # El máximo representa siempre "No pobreza" → pobre = NOT at max value.
     if "pobreza" in varmap and varmap["pobreza"] in group.columns:
-        row["tasa_pobreza"] = _weighted_pct(group[varmap["pobreza"]] > 0, w)
+        pov_col = group[varmap["pobreza"]]
+        pov_max = pov_col.max()  # siempre el máximo = "No pobreza"
+        row["tasa_pobreza"] = _weighted_pct(pov_col < pov_max, w)
 
-    # Pobreza multidimensional
+    # Pobreza multidimensional: 0=no pobre, 1=pobre (binario, codificación normal)
     if varmap.get("pobreza_multi") and varmap["pobreza_multi"] in group.columns:
         row["tasa_pobreza_multi"] = _weighted_pct(group[varmap["pobreza_multi"]] > 0, w)
     else:
@@ -292,13 +308,79 @@ def _aggregate_comuna(group: pd.DataFrame, varmap: dict[str, str]) -> dict:
     return row
 
 
+def _build_casen_crosswalk(
+    link_path: Path,
+    gdf_comunas: gpd.GeoDataFrame,
+) -> dict[str, str]:
+    """
+    Construye un crosswalk {INE_cut_code → GADM_cut_code} leyendo las
+    etiquetas de comuna del archivo link de CASEN y haciendo fuzzy-match
+    con los nombres del GeoDataFrame comunal.
+
+    Retorna un dict vacío si no se puede construir (falla silenciosa).
+    """
+    try:
+        # Leer con etiquetas para obtener nombres de comunas
+        df_labels = pd.read_stata(
+            link_path, convert_categoricals=True,
+            columns=["folio", "comuna"]
+        )
+        df_codes = pd.read_stata(
+            link_path, convert_categoricals=False,
+            columns=["folio", "comuna"]
+        )
+        # Construir: INE_cut_code → nombre_etiqueta
+        df_labels = df_labels.rename(columns={"comuna": "nombre"})
+        df_codes["cut_ine"] = df_codes["comuna"].astype(int).astype(str).str.zfill(5)
+        mapping_df = (
+            df_labels[["folio", "nombre"]]
+            .merge(df_codes[["folio", "cut_ine"]], on="folio")
+            .drop_duplicates("cut_ine")
+        )
+
+        # Lookup GADM: nombre_normalizado → GADM_cut_code
+        gadm_lookup: dict[str, str] = {
+            _normalize(str(r["name"])): str(r["cut_code"])
+            for _, r in gdf_comunas.iterrows()
+        }
+
+        crosswalk: dict[str, str] = {}
+        unmatched = []
+        for _, row in mapping_df.iterrows():
+            norm = _normalize(str(row["nombre"]))
+            if norm in gadm_lookup:
+                crosswalk[row["cut_ine"]] = gadm_lookup[norm]
+            else:
+                candidates = difflib.get_close_matches(norm, gadm_lookup.keys(), n=1, cutoff=0.80)
+                if candidates:
+                    crosswalk[row["cut_ine"]] = gadm_lookup[candidates[0]]
+                else:
+                    unmatched.append(row["nombre"])
+
+        matched = len(crosswalk)
+        total = len(mapping_df)
+        console.print(
+            f"  Crosswalk CASEN→GADM: {matched}/{total} comunas mapeadas"
+        )
+        if unmatched:
+            console.print(f"  [yellow]Sin match ({len(unmatched)}): {sorted(unmatched)[:8]}[/yellow]")
+        return crosswalk
+    except Exception as e:
+        console.print(f"  [yellow]⚠ Crosswalk CASEN→GADM no disponible: {e}[/yellow]")
+        return {}
+
+
 def aggregate_to_comunas(
     df_data: pd.DataFrame,
     df_link: pd.DataFrame,
     year: int,
+    crosswalk: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     """
     Une microdata con archivo comunal y agrega a nivel (cut_code, year).
+
+    Si se proporciona crosswalk {INE_cut→GADM_cut}, remapea los cut_codes
+    a los del GeoDataFrame comunal para asegurar join correcto con panel_anual.
 
     Retorna DataFrame con una fila por comuna.
     """
@@ -307,6 +389,10 @@ def aggregate_to_comunas(
     # Normalizar cut_code: CASEN usa entero (p.ej. 13101), nosotros VARCHAR(5)
     df_link = df_link.copy()
     df_link["cut_code"] = df_link["comuna"].astype(int).astype(str).str.zfill(5)
+
+    # Remap INE → GADM si hay crosswalk disponible
+    if crosswalk:
+        df_link["cut_code"] = df_link["cut_code"].map(crosswalk).fillna(df_link["cut_code"])
 
     # Join: folio + id_persona si ambos archivos tienen la columna;
     # si el archivo de datos no tiene id_persona (CASEN 2017), deduplicamos
@@ -349,10 +435,14 @@ def aggregate_to_comunas(
 def build_casen_dataframe(
     years: list[int] | None = None,
     force: bool = False,
+    gdf_comunas: Optional[gpd.GeoDataFrame] = None,
 ) -> pd.DataFrame:
     """
     Descarga y agrega CASEN para los años indicados.
     Por defecto procesa 2017, 2020 y 2022.
+
+    Si se proporciona gdf_comunas, remapea los cut_codes de INE a los
+    cut_codes GADM usados por panel_anual y el resto del pipeline.
 
     Retorna DataFrame largo con columnas:
         cut_code, year, n_obs, representativa,
@@ -371,6 +461,11 @@ def build_casen_dataframe(
         try:
             data_path, link_path = download_casen_year(year, force=force)
 
+            # Construir crosswalk INE→GADM usando los nombres del link file
+            crosswalk: dict[str, str] = {}
+            if gdf_comunas is not None:
+                crosswalk = _build_casen_crosswalk(link_path, gdf_comunas)
+
             # Cargar solo las columnas necesarias del archivo de datos
             varmap = VAR_MAP[year]
             needed_cols = list(set(varmap.values())) + ["folio"]
@@ -384,7 +479,7 @@ def build_casen_dataframe(
             df_data = df_data[keep]
 
             df_link = _read_dta(link_path)
-            df_year = aggregate_to_comunas(df_data, df_link, year)
+            df_year = aggregate_to_comunas(df_data, df_link, year, crosswalk=crosswalk)
             dfs.append(df_year)
 
         except Exception as e:

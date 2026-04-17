@@ -114,7 +114,7 @@ def run_pipeline(
     df_casen = None
     if not skip_casen:
         try:
-            df_casen = build_casen_dataframe()
+            df_casen = build_casen_dataframe(gdf_comunas=gdf_comunas)
         except Exception as e:
             console.print(f"  [yellow]⚠ CASEN omitido por error: {e}[/yellow]")
     else:
