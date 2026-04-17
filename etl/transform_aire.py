@@ -217,7 +217,8 @@ def parse_airviro_txt(text: str) -> list[tuple[int, float]]:
         try:
             date_str = parts[0].strip()
             year_2d  = int(date_str[:2])
-            year     = 2000 + year_2d
+            # AIRVIRO usa formato YY: 00-30 → 2000-2030, 31-99 → 1931-1999
+            year     = 2000 + year_2d if year_2d <= 30 else 1900 + year_2d
 
             val_str = parts[2].strip()
             if not val_str:
